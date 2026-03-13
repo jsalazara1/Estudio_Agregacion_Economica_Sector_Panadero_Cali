@@ -1,0 +1,476 @@
+---
+title: "Taller 3"
+author: "Jerónimo Salazar Aguirre"
+format: 
+  html:
+       embed-resources: true
+editor: visual
+---
+
+```{r, warning=FALSE, message=FALSE}
+rm(list=ls()) 
+
+#### Cargar librerias 
+library(sf); library(tmap); library(tidyverse); library(readxl); library(tmaptools); library(viridis); library(summarytools); library(terra); library(ggview); library(ggmap); library(mapview); library(leaflet); library(dplyr); library(corrplot); library(knitr);
+library(kableExtra); library(ggplot2); library(ggnewscale); library(spdep); library(openxlsx); library(readr); library(patchwork); library(writexl); library(spatstat.geom); library(dbmss)  
+
+#### Cargar los datos
+setwd("C:/Users/jeros/OneDrive - Universidad EAFIT/PREGRADO/Octavo_semestre/Econometria Avanzada/Taller_3")
+
+data <- read.csv("datar.csv", header = TRUE, sep = ",", dec=".")
+names(data)
+SECTOR_CODE <- 1551
+bakery <- data %>% filter(ciiu_4 == SECTOR_CODE)
+
+
+### Cargar el shapefile de Barrios
+barriosCali <- st_read("Barrios/BARRIOS.shp")
+crs <- st_crs(barriosCali)
+
+cc <- data[data$cod_comuna == 1,]
+sum(cc$ue026a1_nu)
+
+comunas <- barriosCali %>%
+  group_by(NumComuna) %>%
+  summarise()
+```
+
+```{r}
+## Volviendo los datos a puntos geográficos
+points <- st_as_sf(bakery, 
+                   coords = c("x", "y"),
+                      crs = st_crs(barriosCali))
+write.xlsx(data, "data.xlsx")
+
+```
+
+## 1. Mapa de Densidad de la Industria Panadera
+
+El área urbana de Cali está dividida administrativamente en 22 comunas, cada una compuesta por múltiples barrios. La ciudad presenta un marcado gradiente socioeconómico que es fundamental para interpretar la distribución espacial de los establecimientos de panadería. Generalmente se reconocen en Cali 2 polos: la ciudad formal, que ocupa el centro, el noroeste y el sur, y la ciudad informal, que ocupa las periferias este y oeste.
+
+El eje centro-norte (comunas 2, 3, 9 y 19) concentra la actividad comercial formal, los residentes con mayores ingresos, los servicios institucionales y el principal corredor industrial. Las comunas 3 y 4 abarcan conjuntamente el núcleo histórico del centro de la ciudad y las principales zonas manufactureras, con un 28,4 % y un 20,4 % del empleo total censado, respectivamente, lo que las convierte, con diferencia, en las mayores concentraciones económicas de la ciudad. Las comunas 8 y 9 constituyen otro importante cinturón industrial-comercial, y la comuna 9 alberga importantes operaciones de procesamiento de alimentos y manufactura ligera.
+
+Por el contrario, las comunas periféricas del este y el oeste (1, 20, 21) son predominantemente de bajos ingresos, con viviendas informales, alto desempleo, menor densidad de población e infraestructura comercial limitada. La comuna 22 (Ciudad Jardín) es una excepción notable: cubre el 8,8 % de la superficie de la ciudad, pero está escasamente poblada y alberga principalmente usos residenciales y recreativos de altos ingresos, lo que explica su base de empleo extremadamente reducida.
+
+
+```{r}
+ggplot() +
+  geom_sf(data = barriosCali, 
+          aes(fill = "Barrio"), 
+          color = "grey50", linewidth = 0.25) +
+  scale_fill_manual(values = c("Barrio" = "grey95"), 
+                    name = "",
+                    guide = guide_legend(order = 1,
+                      keywidth = unit(0.3, "cm"),   
+                      keyheight = unit(0.3, "cm"),  
+                      override.aes = list(alpha = 0.1), 
+                      label.theme = element_text(size = 6))) +
+  geom_sf(data = points, color = "red", size = 0.05, alpha = .3) +
+  new_scale_fill() +
+  stat_density_2d(data = data,
+                  aes(x = x, y = y, fill = after_stat(level)), # 'level' define el color por densidad
+                  geom = "polygon",        # Crea áreas rellenas
+                  alpha = 0.4,             # Transparencia
+                  color = NA,              # evita el recuadro interno
+                  show.legend = T) +
+  scale_fill_viridis_c(option = "viridis",
+                       breaks = function(x) range(x), 
+                       labels = c("Mín", "Máx"),
+                       name = "Densidad",
+                       guide = guide_colorbar(order = 1,
+                                              barwidth = unit(0.3, "cm"), 
+                                              barheight = unit(.8, "cm"), 
+                                              title.theme = element_text(size = 8), # Texto del título más pequeño
+                                              label.theme = element_text(size = 6))) +  # Números de la leyenda más pequeños
+  theme_void() +
+  theme(legend.position = c(0.8, 0.15), # Ubicación de la leyenda
+        legend.title = element_text(size = 10),
+        legend.spacing.y = unit(-0.3, "cm")) 
+
+```
+
+## 2. Índices de Concentración por Zona
+
+```{r}
+## Agregación por Comuna
+
+E_bakery     <- sum(bakery$ue026a1_nu)
+E_total      <- sum(data$ue026a1_nu)
+N_communes   <- n_distinct(data$cod_comuna)
+N_bk_firms   <- nrow(bakery)
+
+total_by_commune <- data %>%
+  group_by(cod_comuna) %>%
+  summarise(emp_total = sum(ue026a1_nu), .groups = "drop")
+ 
+bakery_by_commune <- bakery %>%
+  group_by(cod_comuna) %>%
+  summarise(emp_bakery = sum(ue026a1_nu),
+            n_firms    = n(), .groups = "drop")
+
+commune <- total_by_commune %>%
+  left_join(bakery_by_commune, by = "cod_comuna") %>%
+  replace_na(list(emp_bakery = 0, n_firms = 0)) %>%
+  mutate(
+    x_r = emp_total / E_total,   
+    s_r = emp_bakery / E_bakery 
+  )
+```
+
+### Índice de Herfindahl-Hirschman (IHH)
+
+Para calcular este índice se toma la siguiente fórmula:
+
+$$
+HHI = \sum_{j=1}^{N}{z_i^2}
+$$
+
+donde $z_j$ corresponde a la participación de la firma j en el empleo total del sector.
+
+Se opta por este índice y no el normalizado, debido a que permite analizar mejor las características de concentración. Este último sería de mayor ayuda si el objetivo es analizar la igualdad en la distribución del *market share*.
+
+```{r}
+## HHI a nivel de firma
+
+H_plant  <- sum((bakery$ue026a1_nu / E_bakery)^2)
+
+cat("\n\n══════════════════════════════════════════════════════\n")
+cat("  RESULTADO 1 — HERFINDAHL-HIRSCHMAN INDEX (HHI)\n")
+cat("══════════════════════════════════════════════════════\n")
+cat(sprintf("   Indice HHI: %.6f\n",  H_plant))
+
+```
+
+### Índice de Ellison y Glaeser (EG)
+
+Ellison y Glaeser (1997) proponen el siguiente estimador insesgado de $\gamma$ que describe el grado de *spillovers* en la industria
+
+$$
+\hat{\gamma}_{EG} =
+\frac{G_{EG} - \left(1 - \sum_{i=1}^{M} x_i^2\right) H}
+{\left(1 - \sum_{i=1}^{M} x_i^2\right)(1 - H)}
+$$ donde $G_{EG}$ es una medida de concentración geográfica, $H$ corresponde al índice calculado anteriormente y $\sum_{i} x_i^2$ es una medida de concentración a nivel comuna.
+
+```{r}
+G_obs  <- sum((commune$s_r - commune$x_r)^2)
+sum_x2 <- sum(commune$x_r^2)
+ 
+gamma_EG <- (G_obs - ((1 - sum_x2) * H_plant)) /
+            ((1 - sum_x2) * (1 - H_plant))
+
+```
+
+### Índice de Maurel y Sédillot
+
+En este caso, hay una sutileza pequeña al momento del cálculo: una modificación sobre el factor $G_{EG}$ para incorporar explícitamente una ponderación por el tamaño de la empresa.
+
+```{r}
+G_MS  <- sum((commune$s_r)^2) - sum((commune$x_r)^2)
+ 
+gamma_MS <- (G_MS - ((1 - sum_x2) * H_plant)) /
+            ((1 - sum_x2) * (1 - H_plant))
+```
+
+### LQ e IQ
+
+El cociente de localización del empleo (LQ) sigue la siguiente fórmula:
+
+$$
+LQ^{s}_i = \frac{s^{s}_i}{x_i}
+$$
+
+donde $s^{s}_i$ representa la proporción del empleo de la comuna i en el sector panadero y $x_i$ es la propoción del empleo de la comuna i en el total de empleo.
+
+Complementariamente se calcula el cociente de empleo industrial (IQ):
+
+$$
+IQ^{s}_i = \frac{c^{s}_i}{x^{s}}
+$$
+siendo $c^{s}_i$ la participación de cada actividad económica en una comuna específica i, y $x^{s}$ la participación del empleo de la industria panadera en el total. Discrecionalmente se elige la comuna 1 como localización de análisis para hacer el respectivo procedimiento
+
+```{r}
+comuna2 <- data[data$cod_comuna == 2,]
+E_comuna2 <- sum(comuna2$ue026a1_nu)
+
+industry_totals <- data %>%
+  group_by(ciiu_4) %>%
+  summarise(emp_indu = sum(ue026a1_nu))
+ 
+comuna2 <- comuna2 %>%
+  group_by(ciiu_4) %>%
+  summarise(emp_2 = sum(ue026a1_nu)) %>%
+  left_join(industry_totals, by = "ciiu_4") %>%
+  replace_na(list(emp_bakery = 0, n_firms = 0)) %>% 
+  mutate(c_r = emp_2/E_comuna2,
+         x_s = emp_indu/E_total)
+
+IQ = comuna2$c_r / comuna2$x_s
+
+## Previamente se había hecho el cálculo de sus componentes
+commune$LQ <- commune$s_r / commune$x_r
+
+
+
+```
+
+## 3. Mapeo LQ
+
+```{r}
+# Step 1: compute convex hull vertices for each commune (all sectors)
+hull_df <- data %>%
+  group_by(cod_comuna) %>%
+  slice(chull(x, y)) %>%          # chull() returns indices of convex hull in order
+  ungroup()
+ 
+# Step 2: join LQ and category
+hull_df <- hull_df %>%
+  left_join(commune %>% select(cod_comuna, LQ), by = "cod_comuna")
+ 
+# Step 3: compute centroid for labels (mean of all firm coords, not hull only)
+commune_centroids <- data %>%
+  group_by(cod_comuna) %>%
+  summarise(cx = mean(x), cy = mean(y), .groups = "drop") %>%
+  left_join(commune %>% select(cod_comuna, LQ), by = "cod_comuna")
+ 
+# Step 4: colour palette (5 classes + sub-average)
+lq_palette <- c(
+  "LQ >= 5  (muy alta)"    = "#7B1522",
+  "3 <= LQ < 5  (alta)"   = "#C0392B",
+  "2 <= LQ < 3  (signif.)"= "#E8906A",
+  "1.25 <= LQ < 2  (mod.)"= "#F5C9A0",
+  "1 <= LQ < 1.25  (avg)" = "#EDE8DF",
+  "LQ < 1  (sub-repr.)"   = "#9ABFD4"
+)
+ 
+hull_df <- hull_df %>%
+  mutate(LQ_class = case_when(
+    LQ >= 5    ~ "LQ >= 5  (muy alta)",
+    LQ >= 3    ~ "3 <= LQ < 5  (alta)",
+    LQ >= 2    ~ "2 <= LQ < 3  (signif.)",
+    LQ >= 1.25 ~ "1.25 <= LQ < 2  (mod.)",
+    LQ >= 1    ~ "1 <= LQ < 1.25  (avg)",
+    TRUE       ~ "LQ < 1  (sub-repr.)"
+  ),
+  LQ_class = factor(LQ_class, levels = names(lq_palette)))
+ 
+# Step 5: plot
+p_lq_map <- ggplot() +
+  # Commune polygons (convex hulls), filled by LQ class
+  geom_polygon(
+    data = hull_df,
+    aes(x = x, y = y, group = cod_comuna, fill = LQ_class),
+    colour = "white", linewidth = 0.8, alpha = 0.85
+  ) +
+  # Commune number labels
+  geom_text(
+    data = commune_centroids,
+    aes(x = cx, y = cy, label = cod_comuna),
+    size = 2.8, fontface = "bold", colour = "white"
+  ) +
+  # LQ value below commune number
+  geom_text(
+    data = commune_centroids,
+    aes(x = cx, y = cy - 300, label = sprintf("%.2f", LQ)),
+    size = 2.2, colour = "white", alpha = 0.9
+  ) +
+  scale_fill_manual(values = lq_palette, name = "LQ — Cociente\nde Localización") +
+  coord_equal() +
+  labs(
+    title    = "Distribución espacial del LQ — Panadería (CIIU 1551)",
+    subtitle = "Polígonos = envolvente convexa de establecimientos por comuna  |  Cali 2005",
+    x = "Coordenada Este (m, MAGNA-SIRGAS Colombia Oeste)",
+    y = "Coordenada Norte (m)",
+    caption = paste0(
+      "LQ > 1: la panadería tiene mayor peso relativo que el promedio ciudad.\n",
+      "LQ < 1: la panadería está sub-representada respecto al total de empleo.\n",
+      "Umbral convencional de especialización significativa: LQ >= 1.25."
+    )
+  ) +
+  theme_minimal(base_size = 11) +
+  theme(
+    plot.title      = element_text(face = "bold"),
+    legend.position = "right",
+    panel.grid      = element_blank(),
+    axis.text       = element_text(size = 8),
+    legend.key.size = unit(0.5, "cm")
+  )
+```
+
+
+
+## 4. Funciones de Concentración por Distancia
+
+```{r}
+window <- owin(
+  xrange = range(data$x),
+  yrange = range(data$y)
+)
+
+pp_bakery <- ppp(
+  x = bakery$x,
+  y = bakery$y,
+  window = window
+)
+
+# Pairwise distances
+dist_matrix <- pairdist(pp_bakery)
+
+# Extract upper triangle
+d <- dist_matrix[upper.tri(dist_matrix)]
+
+# Kernel density estimation
+kd <- density(d)
+
+kd_df <- data.frame(
+  distance = kd$x,
+  kd = kd$y
+)
+
+nsim <- 100
+sim_kd <- list()
+
+for(i in 1:nsim){
+
+  sim_points <- runifpoint(npoints(pp_bakery), win = window)
+
+  dist_sim <- pairdist(sim_points)
+  d_sim <- dist_sim[upper.tri(dist_sim)]
+
+  kd_sim <- density(d_sim, from=min(kd$x), to=max(kd$x))
+
+  sim_kd[[i]] <- kd_sim$y
+}
+
+sim_matrix <- do.call(cbind, sim_kd)
+
+upper <- apply(sim_matrix,1,quantile,0.975)
+lower <- apply(sim_matrix,1,quantile,0.025)
+
+kd_df$upper <- upper
+kd_df$lower <- lower
+
+```
+
+
+```{r}
+ggplot(kd_df, aes(x = distance)) +
+  geom_line(aes(y = kd), color = "red", size = 1) +
+  geom_line(aes(y = upper), linetype = "dashed") +
+  geom_line(aes(y = lower), linetype = "dashed") +
+  labs(
+    title = "Duranton-Overman Kd Function",
+    x = "Distance",
+    y = "Density"
+  ) +
+  theme_minimal()
+```
+
+
+
+### Función Kd de Duranton y Overman
+```{r}
+x_min <- min(data$x);  x_max <- max(data$x)
+y_min <- min(data$y);  y_max <- max(data$y)
+study_window <- owin(c(x_min, x_max), c(y_min, y_max))
+
+r_seq <- seq(100, 5000, by = 100)
+
+bk_coords   <- as.matrix(bakery[, c("x", "y")])
+ref_coords  <- as.matrix(data[,    c("x", "y")])
+
+bk_dists    <- as.vector(dist(bk_coords))
+ 
+# Bandwidth (Regla de Silverman para la distancia)
+h_bw <- bw.nrd0(bk_dists)
+ 
+Kd_obs <- sapply(r_seq, function(d) {
+  mean(dnorm(d - bk_dists, mean = 0, sd = h_bw))
+})
+ 
+# Step 3: Bootstrap under H₀ — draw N_bk_firms locations from reference
+N_BOOT_KD   <- 100   
+Kd_boot_mat <- matrix(0, nrow = N_BOOT_KD, ncol = length(r_seq))
+ 
+for (b in seq_len(N_BOOT_KD)) {
+  idx_b     <- sample(nrow(ref_coords), size = N_bk_firms, replace = FALSE)
+  coords_b  <- ref_coords[idx_b, ]
+  dists_b   <- as.vector(dist(coords_b))
+  Kd_boot_mat[b, ] <- sapply(r_seq, function(d) {
+    mean(dnorm(d - dists_b, mean = 0, sd = h_bw))
+  })
+}
+ 
+Kd_lo <- apply(Kd_boot_mat, 2, quantile, probs = 0.05)
+Kd_hi <- apply(Kd_boot_mat, 2, quantile, probs = 0.95)
+Kd_mean_null <- colMeans(Kd_boot_mat)
+
+```
+
+
+```{r}
+p_kd <- ggplot(kd_df, aes(x = d)) +
+  # Global confidence bands
+  geom_ribbon(aes(ymin = Kd_global_lo, ymax = Kd_global_hi),
+              fill = "#b0c4d8", alpha = 0.35) +
+  # Pointwise confidence bands
+  geom_ribbon(aes(ymin = Kd_pw_lo, ymax = Kd_pw_hi),
+              fill = "#3d4a5c", alpha = 0.20) +
+  # Null mean
+  geom_line(aes(y = Kd_null_mean), colour = "#3d4a5c",
+            linewidth = 0.7, linetype = "dashed") +
+  # Observed Kd
+  geom_line(aes(y = Kd_obs), colour = "#c0392b", linewidth = 1.1) +
+  # Shade localised regions
+  geom_rect(data = subset(kd_df, localised_pw),
+            aes(xmin = d - 50, xmax = d + 50, ymin = -Inf, ymax = Inf),
+            fill = "#c0392b", alpha = 0.07, inherit.aes = FALSE) +
+  scale_x_continuous(labels = function(x) paste0(x/1000, " km"),
+                     breaks = seq(0, 5000, 1000)) +
+  labs(
+    title    = "Kd Function — Duranton & Overman (2005)",
+    subtitle = sprintf("Bakery CIIU 1551  |  h = %.0f m  |  B = %d bootstrap draws",
+                       h_bw, N_BOOT_KD),
+    x = "Distance (km)", y = "Kernel density of pairwise distances",
+    caption = paste0(
+      "Red = observed K̂d. Dark shading = pointwise 90% CI. ",
+      "Light shading = global 90% CI (D&O max-deviation method).\n",
+      "Red areas = distances where bakery is significantly localised (pointwise)."
+    )
+  ) +
+  theme_minimal(base_size = 11) +
+  theme(plot.title = element_text(face = "bold"),
+        panel.grid.minor = element_blank())
+```
+
+
+### Función M de Marcon y Puech
+
+```{r}
+data$sector <- ifelse(data$ciiu_4 == 1551, "bakery", "other")
+
+pp_all <- ppp(
+  x = data$x,
+  y = data$y,
+  window = window,
+  marks = as.factor(data$sector)
+)
+
+M_res <- Mhat(pp_all, "bakery")
+
+M_df <- data.frame(
+  distance = M_res$r,
+  M = M_res$iso
+)
+
+ggplot(M_df, aes(x = distance, y = M)) +
+  geom_line(color = "blue", size = 1) +
+  geom_hline(yintercept = 1, linetype = "dashed") +
+  labs(
+    title = "Marcon-Puech M Function (Bakery)",
+    x = "Distance",
+    y = "M(d)"
+  ) +
+  theme_minimal()
+
+```
+
